@@ -3,3 +3,6 @@ bin/
 src_build/
 compile_commands.json
 .vscode/
+.mcp.json
+skills-lock.json
+.claude/
