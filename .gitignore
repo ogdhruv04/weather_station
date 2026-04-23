@@ -1,0 +1,5 @@
+build/
+bin/
+src_build/
+compile_commands.json
+.vscode/
