@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:esp32",
+  "hardwareFolders": "/home/dhruv/.arduino15/packages/esp32/hardware/esp32/3.3.8,/home/dhruv/.arduino15/packages/esp32/hardware/esp32/3.3.8",
+  "otherLibrariesFolders": "/home/dhruv/Arduino/libraries",
+  "sketchLocation": "/home/dhruv/weather_station/src_build"
+}
