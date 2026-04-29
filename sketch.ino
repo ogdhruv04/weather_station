@@ -14,14 +14,15 @@
 #define WIFI_SSID       "pitest"
 #define WIFI_PASS       "12345678"
 #define NTP_SERVER      "pool.ntp.org"
-#define GMT_OFFSET_SEC  19800          // IST  (UTC+5:30)
+#define GMT_OFFSET_SEC  19800          // IST (UTC+5:30)
 #define DST_OFFSET_SEC  0
 
-// OpenWeatherMap — get a free key at https://openweathermap.org/api
-#define OWM_API_KEY     "07bd2426a16fd1aecbf4fced394e6802"
-#define OWM_CITY        "Roorkee"        // change to your city
-#define OWM_UNITS       "metric"       // "metric" = Celsius, "imperial" = Fahrenheit
-#define OWM_UPDATE_MS   600000         // refresh every 10 min
+// Open-Meteo — no API key needed, just set your coordinates
+#define WX_CITY         "Roorkee"
+#define WX_LAT          "29.8667"
+#define WX_LON          "77.8833"
+#define WX_TZ           "Asia/Kolkata"
+#define WX_UPDATE_MS    600000         // refresh every 10 min
 
 #define DHTPIN          4
 #define DHTTYPE         DHT22
@@ -33,12 +34,11 @@
 #define OLED_ADDR       0x3C
 
 #define NUM_SCREENS     7
-#define SCREEN_MS       5000           // rotate every 5 s
-#define READ_MS         2000           // sensor poll
-#define SPARK_CAP       60             // sparkline samples
-#define SPARK_MS        10000          // sample every 10 s
-#define MAX_FORECASTS   3              // columns shown on forecast screen
-#define FC_FETCH_CNT    8              // slots fetched (covers ~24 h)
+#define SCREEN_MS       5000
+#define READ_MS         2000
+#define SPARK_CAP       60
+#define SPARK_MS        10000
+#define MAX_FORECASTS   3
 
 // ── Objects ────────────────────────────────────
 DHT              dht(DHTPIN, DHTTYPE);
@@ -46,52 +46,75 @@ Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, OLED_RESET);
 Adafruit_BMP085  bmp;
 
 // ── State ──────────────────────────────────────
-bool  bmpFound   = false;
-bool  timeReady  = false;
-int   curScr     = 0;
-int   prevScr    = -1;
+bool  bmpFound  = false;
+bool  timeReady = false;
+int   curScr    = 0;
+int   prevScr   = -1;
 
-unsigned long lastSwitch = 0, lastRead = 0, startTime = 0;
-unsigned long lastSpark  = 0, lastOwm  = 0;
+unsigned long lastSwitch = 0, lastRead  = 0, startTime = 0;
+unsigned long lastSpark  = 0, lastWxMs  = 0;
 
-// Transition
-bool  sliding     = false;
-int   slideOff    = 0;
+bool  sliding    = false;
+int   slideOff   = 0;
 const int SLIDE_STEP = 32;
 
 // Indoor sensors
 float temp = 0, hum = 0, pressure = 0;
 float heatIdx = 0, dewPt = 0, alt = 0;
 
-// Sparkline ring-buffer
+// Sparkline
 float sparkBuf[SPARK_CAP];
 int   sparkHead = 0, sparkN = 0;
 
-// ── OpenWeatherMap data ────────────────────────
-struct OwmCurrent {
-  char  city[20];
-  char  desc[24];
-  char  icon[4];
-  float temp, feelsLike;
-  float humidity, windSpeed;
-  int   windDeg;
-  long  sunrise, sunset;
+// ── Weather data (Open-Meteo) ──────────────────
+struct WeatherNow {
+  float temp, feelsLike, humidity, windSpeed;
+  float dayMin, dayMax;
+  int   wmoCode;
+  char  sunrise[6];   // "HH:MM"
+  char  sunset[6];    // "HH:MM"
   bool  valid;
-} owmNow = { "", "", "", 0,0,0,0,0,0,0, false };
+} wx = { 0,0,0,0, 999,-999, 0, "", "", false };
 
-// Derived from forecast slots — the real daily range
-float fcDayMin =  999;
-float fcDayMax = -999;
-
-struct OwmForecast {
-  long  dt;
+struct FcSlot {
+  int   hour;         // 0-23
   float temp;
-  char  icon[4];
-  char  desc[20];
-} owmFc[MAX_FORECASTS];
+  int   wmoCode;
+} fc[MAX_FORECASTS];
 
-int  owmFcCount = 0;
-bool owmFetching = false;
+int  fcCount    = 0;
+bool wxFetching = false;
+
+// ════════════════════════════════════════════════
+//  WMO WEATHER CODE HELPERS
+// ════════════════════════════════════════════════
+
+const char* wmoDesc(int c) {
+  if (c == 0)              return "clear sky";
+  if (c == 1)              return "mainly clear";
+  if (c == 2)              return "partly cloudy";
+  if (c == 3)              return "overcast";
+  if (c <= 48)             return "foggy";
+  if (c <= 55)             return "drizzle";
+  if (c <= 65)             return c <= 61 ? "light rain" : "heavy rain";
+  if (c <= 77)             return "snowing";
+  if (c <= 82)             return "rain showers";
+  if (c <= 86)             return "snow showers";
+  return "thunderstorm";
+}
+
+// Map WMO code to one of our icon types: 0=sun 1=partcloud 2=cloud 3=drop 4=snow 5=thunder 6=mist
+int wmoIcon(int c) {
+  if (c <= 1)  return 0;  // clear
+  if (c == 2)  return 1;  // partly cloudy
+  if (c == 3)  return 2;  // overcast
+  if (c <= 48) return 6;  // fog/mist
+  if (c <= 67) return 3;  // drizzle/rain
+  if (c <= 77) return 4;  // snow
+  if (c <= 82) return 3;  // rain showers
+  if (c <= 86) return 4;  // snow showers
+  return 5;               // thunder
+}
 
 // ════════════════════════════════════════════════
 //  UTILITY
@@ -112,7 +135,19 @@ const char* comfortLabel(float t, float h) {
   return "Comfortable";
 }
 
-// Format a unix timestamp → "HH:MM" (IST)
+// Parse "HH:MM" from Open-Meteo ISO string "2026-04-23T05:42"
+void parseHHMM(const char* iso, char* out) {
+  if (strlen(iso) >= 16) {
+    out[0] = iso[11]; out[1] = iso[12];
+    out[2] = ':';
+    out[3] = iso[14]; out[4] = iso[15];
+    out[5] = '\0';
+  } else {
+    strlcpy(out, "--:--", 6);
+  }
+}
+
+// Format current-time unix timestamp → "HH:MM"
 void fmtTime(long epoch, char* buf) {
   time_t t = (time_t)epoch;
   struct tm ti;
@@ -145,7 +180,7 @@ void drawSun(int cx, int cy, int r) {
 }
 
 void drawCloud(int x, int y) {
-  display.fillCircle(x + 5, y + 8, 4, SSD1306_WHITE);
+  display.fillCircle(x + 5,  y + 8, 4, SSD1306_WHITE);
   display.fillCircle(x + 11, y + 5, 5, SSD1306_WHITE);
   display.fillCircle(x + 17, y + 8, 4, SSD1306_WHITE);
   display.fillRect(x + 3, y + 8, 16, 4, SSD1306_WHITE);
@@ -164,63 +199,57 @@ void drawSnow(int cx, int cy, int r) {
 }
 
 void drawThunder(int cx, int cy) {
-  // Lightning bolt
-  display.drawLine(cx, cy - 6, cx - 2, cy, SSD1306_WHITE);
-  display.drawLine(cx - 2, cy, cx + 1, cy, SSD1306_WHITE);
-  display.drawLine(cx + 1, cy, cx - 1, cy + 6, SSD1306_WHITE);
+  display.drawLine(cx,     cy - 6, cx - 2, cy,     SSD1306_WHITE);
+  display.drawLine(cx - 2, cy,     cx + 1, cy,     SSD1306_WHITE);
+  display.drawLine(cx + 1, cy,     cx - 1, cy + 6, SSD1306_WHITE);
 }
 
 void drawMist(int x, int y) {
-  for (int i = 0; i < 4; i++) {
-    int yy = y + 3 + i * 3;
-    display.drawLine(x + 2, yy, x + 16, yy, SSD1306_WHITE);
+  for (int i = 0; i < 4; i++)
+    display.drawLine(x + 2, y + 3 + i * 3, x + 16, y + 3 + i * 3, SSD1306_WHITE);
+}
+
+// Draw by icon type (0-6) at full size
+void drawIconType(int type, int x, int y) {
+  switch (type) {
+    case 0: drawSun(x + 8, y + 7, 4); break;
+    case 1: drawSun(x + 14, y + 3, 3); drawCloud(x - 2, y); break;
+    case 2: drawCloud(x, y); break;
+    case 3: drawDrop(x + 8, y + 8); break;
+    case 4: drawSnow(x + 8, y + 7, 6); break;
+    case 5: drawThunder(x + 8, y + 7); break;
+    case 6: drawMist(x, y); break;
   }
 }
 
-// Draw icon based on sensor readings (indoor)
-void drawWeatherIcon(int x, int y) {
-  if (temp < 10)      drawSnow(x + 8, y + 7, 6);
-  else if (hum > 70)  drawDrop(x + 8, y + 8);
-  else if (temp > 30) drawSun(x + 8, y + 7, 4);
-  else                drawCloud(x, y);
+// Draw by icon type at small size (for forecast columns)
+void drawIconSmall(int type, int cx, int cy) {
+  switch (type) {
+    case 0: drawSun(cx, cy, 3); break;
+    case 1: drawSun(cx + 4, cy - 2, 2); drawCloud(cx - 7, cy - 4); break;
+    case 2:
+      display.fillCircle(cx - 5, cy, 3, SSD1306_WHITE);
+      display.fillCircle(cx,     cy - 2, 4, SSD1306_WHITE);
+      display.fillCircle(cx + 5, cy, 3, SSD1306_WHITE);
+      display.fillRect(cx - 7, cy, 14, 3, SSD1306_WHITE);
+      break;
+    case 3: display.fillCircle(cx, cy, 3, SSD1306_WHITE);
+            display.fillTriangle(cx - 2, cy, cx + 2, cy, cx, cy - 5, SSD1306_WHITE); break;
+    case 4: drawSnow(cx, cy, 4); break;
+    case 5: drawThunder(cx, cy); break;
+    case 6:
+      for (int i = 0; i < 3; i++)
+        display.drawLine(cx - 5, cy - 2 + i * 3, cx + 5, cy - 2 + i * 3, SSD1306_WHITE);
+      break;
+  }
 }
 
-// Draw icon based on OWM icon code (outdoor)
-void drawOwmIcon(int x, int y, const char* icon) {
-  // icon codes: 01=clear, 02=few clouds, 03/04=clouds,
-  //             09/10=rain, 11=thunder, 13=snow, 50=mist
-  if      (strncmp(icon, "01", 2) == 0) drawSun(x + 8, y + 7, 4);
-  else if (strncmp(icon, "02", 2) == 0) { drawSun(x + 14, y + 3, 3); drawCloud(x - 2, y); }
-  else if (strncmp(icon, "03", 2) == 0) drawCloud(x, y);
-  else if (strncmp(icon, "04", 2) == 0) drawCloud(x, y);
-  else if (strncmp(icon, "09", 2) == 0) drawDrop(x + 8, y + 8);
-  else if (strncmp(icon, "10", 2) == 0) drawDrop(x + 8, y + 8);
-  else if (strncmp(icon, "11", 2) == 0) drawThunder(x + 8, y + 7);
-  else if (strncmp(icon, "13", 2) == 0) drawSnow(x + 8, y + 7, 6);
-  else if (strncmp(icon, "50", 2) == 0) drawMist(x, y);
-  else                                   drawCloud(x, y);
-}
-
-// Small icon (for forecast columns, fits ~12px)
-void drawOwmIconSmall(int x, int y, const char* icon) {
-  if      (strncmp(icon, "01", 2) == 0) drawSun(x + 5, y + 5, 3);
-  else if (strncmp(icon, "02", 2) == 0) { drawSun(x + 10, y + 2, 2); drawCloud(x - 2, y); }
-  else if (strncmp(icon, "03", 2) == 0 || strncmp(icon, "04", 2) == 0) {
-    display.fillCircle(x + 3, y + 6, 3, SSD1306_WHITE);
-    display.fillCircle(x + 8, y + 4, 4, SSD1306_WHITE);
-    display.fillCircle(x + 13, y + 6, 3, SSD1306_WHITE);
-    display.fillRect(x + 2, y + 6, 12, 3, SSD1306_WHITE);
-  }
-  else if (strncmp(icon, "09", 2) == 0 || strncmp(icon, "10", 2) == 0) {
-    display.fillCircle(x + 6, y + 4, 3, SSD1306_WHITE);
-    display.fillTriangle(x + 4, y + 3, x + 8, y + 3, x + 6, y - 2, SSD1306_WHITE);
-  }
-  else if (strncmp(icon, "11", 2) == 0) drawThunder(x + 6, y + 5);
-  else if (strncmp(icon, "13", 2) == 0) drawSnow(x + 6, y + 5, 4);
-  else if (strncmp(icon, "50", 2) == 0) {
-    for (int i = 0; i < 3; i++) display.drawLine(x + 1, y + 3 + i * 3, x + 12, y + 3 + i * 3, SSD1306_WHITE);
-  }
-  else drawCloud(x - 2, y);
+// Indoor icon (based on sensor readings)
+void drawIndoorIcon(int x, int y) {
+  if      (temp < 10)  drawIconType(4, x, y);
+  else if (hum  > 70)  drawIconType(3, x, y);
+  else if (temp > 30)  drawIconType(0, x, y);
+  else                 drawIconType(2, x, y);
 }
 
 // ── Sparkline ──────────────────────────────────
@@ -257,110 +286,90 @@ void drawSparkline(int x, int y, int w, int h) {
   }
 
   char lb[6];
-  dtostrf(mn, 3, 0, lb);
-  display.setCursor(x + w + 2, y + h - 8);
-  display.print(lb);
-  dtostrf(mx, 3, 0, lb);
-  display.setCursor(x + w + 2, y);
-  display.print(lb);
+  dtostrf(mn, 3, 0, lb); display.setCursor(x + w + 2, y + h - 8); display.print(lb);
+  dtostrf(mx, 3, 0, lb); display.setCursor(x + w + 2, y);         display.print(lb);
 }
 
 // ════════════════════════════════════════════════
-//  OPENWEATHERMAP  FETCH
+//  OPEN-METEO  FETCH  (single call, no API key)
 // ════════════════════════════════════════════════
 
-void fetchCurrentWeather() {
+void fetchWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  HTTPClient http;
-  String url = "http://api.openweathermap.org/data/2.5/weather?q=";
-  url += OWM_CITY;
-  url += "&appid=";
-  url += OWM_API_KEY;
-  url += "&units=";
-  url += OWM_UNITS;
-
-  http.begin(url);
-  int code = http.GET();
-  if (code == 200) {
-    String payload = http.getString();
-    JsonDocument doc;
-    if (!deserializeJson(doc, payload)) {
-      strlcpy(owmNow.city, doc["name"] | "???", sizeof(owmNow.city));
-      strlcpy(owmNow.desc, doc["weather"][0]["description"] | "", sizeof(owmNow.desc));
-      strlcpy(owmNow.icon, doc["weather"][0]["icon"] | "03d", sizeof(owmNow.icon));
-      owmNow.temp      = doc["main"]["temp"]       | 0.0f;
-      owmNow.feelsLike = doc["main"]["feels_like"] | 0.0f;
-      owmNow.humidity  = doc["main"]["humidity"]   | 0.0f;
-      owmNow.windSpeed = doc["wind"]["speed"]      | 0.0f;
-      owmNow.windDeg   = doc["wind"]["deg"]        | 0;
-      owmNow.sunrise   = doc["sys"]["sunrise"]     | 0L;
-      owmNow.sunset    = doc["sys"]["sunset"]      | 0L;
-      owmNow.valid     = true;
-      Serial.printf("[OWM] Current: %s %.1fC (%s)\n", owmNow.city, owmNow.temp, owmNow.desc);
-    }
-  } else {
-    Serial.printf("[OWM] Current failed: %d\n", code);
-  }
-  http.end();
-}
-
-void fetchForecast() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  String url =
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude="  WX_LAT
+    "&longitude=" WX_LON
+    "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+               "weather_code,wind_speed_10m"
+    "&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset"
+    "&hourly=temperature_2m,weather_code"
+    "&timezone=" WX_TZ
+    "&forecast_days=2";
 
   HTTPClient http;
-  String url = "http://api.openweathermap.org/data/2.5/forecast?q=";
-  url += OWM_CITY;
-  url += "&appid=";
-  url += OWM_API_KEY;
-  url += "&units=";
-  url += OWM_UNITS;
-  url += "&cnt=";
-  url += FC_FETCH_CNT;
-
   http.begin(url);
   int code = http.GET();
-  if (code == 200) {
-    String payload = http.getString();
-    JsonDocument doc;
-    if (!deserializeJson(doc, payload)) {
-      JsonArray list = doc["list"];
-      owmFcCount = 0;
-      fcDayMin =  999;
-      fcDayMax = -999;
 
-      for (int i = 0; i < (int)list.size(); i++) {
-        float t = list[i]["main"]["temp"] | 0.0f;
-        if (t < fcDayMin) fcDayMin = t;
-        if (t > fcDayMax) fcDayMax = t;
-
-        // Store first MAX_FORECASTS slots for the forecast screen
-        if (i < MAX_FORECASTS) {
-          owmFc[i].dt   = list[i]["dt"] | 0L;
-          owmFc[i].temp = t;
-          strlcpy(owmFc[i].icon, list[i]["weather"][0]["icon"] | "03d", sizeof(owmFc[i].icon));
-          strlcpy(owmFc[i].desc, list[i]["weather"][0]["main"] | "", sizeof(owmFc[i].desc));
-          owmFcCount++;
-        }
-      }
-      Serial.printf("[OWM] Forecast: %d slots, Lo:%.1f Hi:%.1f\n",
-                    (int)list.size(), fcDayMin, fcDayMax);
-    }
-  } else {
-    Serial.printf("[OWM] Forecast failed: %d\n", code);
+  if (code != 200) {
+    Serial.printf("[WX] fetch failed: %d\n", code);
+    http.end();
+    return;
   }
-  http.end();
-}
 
-void fetchOwm() {
-  owmFetching = true;
-  fetchCurrentWeather();
-  fetchForecast();
-  owmFetching = false;
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) {
+    Serial.println("[WX] JSON parse error");
+    return;
+  }
+
+  // ── Current ──
+  JsonObject cur = doc["current"];
+  wx.temp      = cur["temperature_2m"]      | 0.0f;
+  wx.feelsLike = cur["apparent_temperature"] | 0.0f;
+  wx.humidity  = cur["relative_humidity_2m"] | 0.0f;
+  wx.windSpeed = cur["wind_speed_10m"]       | 0.0f;
+  wx.wmoCode   = cur["weather_code"]        | 0;
+
+  // ── Daily (today = index 0) ──
+  wx.dayMin = doc["daily"]["temperature_2m_min"][0] | 0.0f;
+  wx.dayMax = doc["daily"]["temperature_2m_max"][0] | 0.0f;
+  parseHHMM(doc["daily"]["sunrise"][0] | "", wx.sunrise);
+  parseHHMM(doc["daily"]["sunset"][0]  | "", wx.sunset);
+
+  wx.valid = true;
+  Serial.printf("[WX] %.1fC feels %.1fC | WMO:%d | Lo:%.1f Hi:%.1f | %s-%s\n",
+                wx.temp, wx.feelsLike, wx.wmoCode, wx.dayMin, wx.dayMax,
+                wx.sunrise, wx.sunset);
+
+  // ── Hourly forecast — pick next 3 slots at +3h, +6h, +9h ──
+  struct tm ti;
+  getLocalTime(&ti, 100);
+  int baseIdx = ti.tm_hour + 3;   // first slot ~3h from now
+
+  JsonArray hTime = doc["hourly"]["time"];
+  JsonArray hTemp = doc["hourly"]["temperature_2m"];
+  JsonArray hCode = doc["hourly"]["weather_code"];
+  int hLen = hTime.size();
+
+  fcCount = 0;
+  for (int s = 0; s < MAX_FORECASTS; s++) {
+    int idx = baseIdx + s * 3;
+    if (idx >= hLen) break;
+    fc[s].hour    = (idx) % 24;
+    fc[s].temp    = hTemp[idx] | 0.0f;
+    fc[s].wmoCode = hCode[idx] | 0;
+    fcCount++;
+  }
+  Serial.printf("[WX] Forecast: %d slots\n", fcCount);
 }
 
 // ════════════════════════════════════════════════
-//  CHROME  (header with live clock + page dots)
+//  CHROME  (inverted header + live clock + dots)
 // ════════════════════════════════════════════════
 
 void drawChrome(const char* title, int idx, int xo) {
@@ -390,7 +399,7 @@ void drawChrome(const char* title, int idx, int xo) {
 }
 
 // ════════════════════════════════════════════════
-//  SCREENS   (each takes an x-offset for sliding)
+//  SCREENS
 // ════════════════════════════════════════════════
 
 // 0 ── Clock & Date ─────────────────────────────
@@ -418,8 +427,8 @@ void scrClock(int xo) {
     static const char* mn[] = {"Jan","Feb","Mar","Apr","May","Jun",
                                "Jul","Aug","Sep","Oct","Nov","Dec"};
     char db[24];
-    sprintf(db, "%s, %02d %s %04d", dn[ti.tm_wday], ti.tm_mday,
-            mn[ti.tm_mon], ti.tm_year + 1900);
+    sprintf(db, "%s, %02d %s %04d",
+            dn[ti.tm_wday], ti.tm_mday, mn[ti.tm_mon], ti.tm_year + 1900);
     int tw = strlen(db) * 6;
     display.setCursor(xo + (128 - tw) / 2, 46);
     display.print(db);
@@ -435,21 +444,21 @@ void scrWeather(int xo) {
   drawChrome("INDOOR", 1, xo);
   display.setTextColor(SSD1306_WHITE);
 
-  drawWeatherIcon(xo + 104, 13);
+  drawIndoorIcon(xo + 104, 13);
 
   display.setTextSize(2);
-  display.setCursor(xo + 0, 14);
+  display.setCursor(xo, 14);
   display.print(temp, 1);
   display.setTextSize(1);
   display.print(" C");
 
-  display.setCursor(xo + 0, 33);
+  display.setCursor(xo, 33);
   display.print("Humidity: ");
   display.print(hum, 1);
   display.print("%");
   drawBar(xo, 43, 96, 5, hum, 0, 100);
 
-  display.setCursor(xo + 0, 51);
+  display.setCursor(xo, 51);
   display.print("Pressure: ");
   if (bmpFound) { display.print(pressure, 0); display.print(" hPa"); }
   else          display.print("N/A");
@@ -480,102 +489,89 @@ void scrComfort(int xo) {
   display.print(comfortLabel(temp, hum));
 }
 
-// 3 ── Outdoor Weather (OWM) ────────────────────
+// 3 ── Outdoor Weather (Open-Meteo) ────────────
 void scrOutdoor(int xo) {
   drawChrome("OUTDOOR", 3, xo);
   display.setTextColor(SSD1306_WHITE);
 
-  if (!owmNow.valid) {
+  if (!wx.valid) {
     display.setTextSize(1);
-    display.setCursor(xo + 10, 25);
-    if (strcmp(OWM_API_KEY, "YOUR_API_KEY_HERE") == 0)
-      display.print("Set OWM_API_KEY!");
-    else
-      display.print("Fetching data...");
+    display.setCursor(xo + 18, 30);
+    display.print("Fetching data...");
     return;
   }
 
-  // ── Row 1 (y12): Icon + City name ──
-  drawOwmIcon(xo + 0, 12, owmNow.icon);
+  // ── Row 1: Icon + City ──
+  drawIconType(wmoIcon(wx.wmoCode), xo, 12);
   display.setTextSize(1);
   display.setCursor(xo + 26, 14);
-  display.print(owmNow.city);
+  display.print(WX_CITY);
 
-  // ── Row 2 (y24): Big temperature ──
+  // ── Row 2: Big temperature ──
   display.setTextSize(2);
   display.setCursor(xo + 26, 24);
-  display.print(owmNow.temp, 1);
+  display.print(wx.temp, 1);
   display.setTextSize(1);
   display.print("C");
 
-  // ── Row 3 (y41): Description ──
+  // ── Row 3: Description ──
   display.setCursor(xo, 41);
-  display.print(owmNow.desc);
+  display.print(wmoDesc(wx.wmoCode));
 
-  // ── Row 4 (y51): Lo/Hi + Sunrise/Sunset ──
+  // ── Row 4: Lo/Hi  +  Sunrise/Sunset ──
   display.setCursor(xo, 51);
-  display.print(fcDayMin, 0);
+  display.print(wx.dayMin, 0);
   display.print("/");
-  display.print(fcDayMax, 0);
-  display.print("C");
-  if (owmNow.sunrise > 0) {
-    char buf[6];
-    display.print("  ^");
-    fmtTime(owmNow.sunrise, buf);
-    display.print(buf);
-    display.print(" v");
-    fmtTime(owmNow.sunset, buf);
-    display.print(buf);
-  }
+  display.print(wx.dayMax, 0);
+  display.print("C  ^");
+  display.print(wx.sunrise);
+  display.print(" v");
+  display.print(wx.sunset);
 }
 
-// 4 ── 3-Hour Forecast (OWM) ───────────────────
+// 4 ── 3-Hour Forecast (Open-Meteo hourly) ─────
 void scrForecast(int xo) {
   drawChrome("FORECAST", 4, xo);
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
 
-  if (owmFcCount == 0) {
-    display.setCursor(xo + 10, 25);
-    if (strcmp(OWM_API_KEY, "YOUR_API_KEY_HERE") == 0)
-      display.print("Set OWM_API_KEY!");
-    else
-      display.print("Fetching data...");
+  if (fcCount == 0) {
+    display.setCursor(xo + 18, 30);
+    display.print("Fetching data...");
     return;
   }
 
-  // 3 columns, each ~40px wide
-  int colW = 42;
-  for (int i = 0; i < owmFcCount && i < 3; i++) {
-    int cx = xo + i * colW + 1;
+  const int colW = 42;
+  for (int i = 0; i < fcCount; i++) {
+    int cx = xo + i * colW;
 
-    // Time
+    // Separator
+    if (i > 0) display.drawLine(xo + i * colW - 1, 12, xo + i * colW - 1, 56, SSD1306_WHITE);
+
+    // Time label  "14:00"
     char tb[6];
-    fmtTime(owmFc[i].dt, tb);
+    sprintf(tb, "%02d:00", fc[i].hour);
     int tw = strlen(tb) * 6;
     display.setCursor(cx + (colW - tw) / 2, 14);
     display.print(tb);
 
-    // Separator lines between columns
-    if (i > 0) display.drawLine(xo + i * colW - 1, 12, xo + i * colW - 1, 56, SSD1306_WHITE);
+    // Icon centred in column
+    drawIconSmall(wmoIcon(fc[i].wmoCode), cx + colW / 2, 30);
 
-    // Icon (centred in column)
-    drawOwmIconSmall(cx + (colW - 16) / 2, 24, owmFc[i].icon);
-
-    // Temp
-    char tempBuf[8];
-    dtostrf(owmFc[i].temp, 3, 1, tempBuf);
-    int tempW = strlen(tempBuf) * 6 + 6; // +6 for "C"
-    display.setCursor(cx + (colW - tempW) / 2, 40);
+    // Temperature
+    char tempBuf[7];
+    dtostrf(fc[i].temp, 3, 1, tempBuf);
+    int tempW = (strlen(tempBuf) + 1) * 6;
+    display.setCursor(cx + (colW - tempW) / 2, 41);
     display.print(tempBuf);
     display.print("C");
 
-    // Short description
-    int descW = strlen(owmFc[i].desc) * 6;
-    display.setCursor(cx + (colW - min(descW, colW)) / 2, 50);
-    // Truncate if too wide
+    // Short condition label (7 chars max to fit column)
+    const char* d = wmoDesc(fc[i].wmoCode);
     char descBuf[8];
-    strlcpy(descBuf, owmFc[i].desc, min((int)sizeof(descBuf), colW / 6 + 1));
+    strlcpy(descBuf, d, sizeof(descBuf));
+    int descW = strlen(descBuf) * 6;
+    display.setCursor(cx + (colW - min(descW, colW)) / 2, 51);
     display.print(descBuf);
   }
 }
@@ -639,7 +635,7 @@ void scrSystem(int xo) {
   display.print(bmpFound ? "OK" : "--");
   display.setCursor(xo + 86, 24);
   display.print("API:");
-  display.print(owmNow.valid ? "OK" : "--");
+  display.print(wx.valid ? "OK" : "--");
 
   display.setCursor(xo, 35);
   display.print("Temp trend");
@@ -662,10 +658,7 @@ void renderFrame() {
     scrTable[prevScr](-slideOff);
     scrTable[curScr](128 - slideOff);
     slideOff += SLIDE_STEP;
-    if (slideOff >= 128) {
-      sliding = false;
-      prevScr = curScr;
-    }
+    if (slideOff >= 128) { sliding = false; prevScr = curScr; }
   } else {
     scrTable[curScr](0);
   }
@@ -678,7 +671,6 @@ void renderFrame() {
 // ════════════════════════════════════════════════
 
 void bootSplash() {
-  // 1. Border draws itself
   for (int i = 0; i <= 128; i += 8) {
     display.clearDisplay();
     int w = min(i, 128), h = min(i / 2, 64);
@@ -686,28 +678,20 @@ void bootSplash() {
     display.display();
     delay(15);
   }
-
   display.clearDisplay();
   display.drawRect(0, 0, 128, 64, SSD1306_WHITE);
 
-  // 2. Title — typing effect
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
-
   const char* line1 = "ESP32";
   display.setCursor(46, 6);
-  for (int i = 0; line1[i]; i++) {
-    display.print(line1[i]); display.display(); delay(60);
-  }
+  for (int i = 0; line1[i]; i++) { display.print(line1[i]); display.display(); delay(60); }
 
   const char* line2 = "WEATHER STATION";
   display.setCursor(17, 18);
-  for (int i = 0; line2[i]; i++) {
-    display.print(line2[i]); display.display(); delay(35);
-  }
+  for (int i = 0; line2[i]; i++) { display.print(line2[i]); display.display(); delay(35); }
   delay(200);
 
-  // 3. Sensor status
   display.setCursor(12, 32);
   display.print("DHT22  : OK");
   display.display(); delay(250);
@@ -717,7 +701,6 @@ void bootSplash() {
   display.print(bmpFound ? "OK" : "N/A");
   display.display(); delay(250);
 
-  // 4. WiFi connect with progress bar
   display.setCursor(12, 52);
   display.print("WiFi   : ");
   display.display();
@@ -725,38 +708,28 @@ void bootSplash() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  int barX = 12, barW = 104, barY = 58, barH = 4;
-  int maxAttempts = 20;
-
+  const int barX = 12, barW = 104, barY = 58, barH = 4;
+  const int maxAttempts = 20;
   for (int a = 0; a < maxAttempts; a++) {
-    int fill = (int)((float)(a + 1) / maxAttempts * barW);
-    display.fillRect(barX, barY, fill, barH, SSD1306_WHITE);
+    display.fillRect(barX, barY, (a + 1) * barW / maxAttempts, barH, SSD1306_WHITE);
     display.display();
-
     if (WiFi.status() == WL_CONNECTED) {
       display.fillRect(barX, barY, barW, barH, SSD1306_WHITE);
-      display.setCursor(66, 52);
-      display.print("OK");
-      display.display();
-      delay(400);
+      display.setCursor(66, 52); display.print("OK");
+      display.display(); delay(400);
       break;
     }
     delay(500);
   }
-
   if (WiFi.status() != WL_CONNECTED) {
-    display.setCursor(66, 52);
-    display.print("FAIL");
-    display.display();
-    delay(600);
+    display.setCursor(66, 52); display.print("FAIL");
+    display.display(); delay(600);
   }
 
-  // Flash effect
   display.invertDisplay(true);  delay(80);
   display.invertDisplay(false); delay(80);
   display.invertDisplay(true);  delay(60);
-  display.invertDisplay(false);
-  delay(300);
+  display.invertDisplay(false); delay(300);
 }
 
 // ════════════════════════════════════════════════
@@ -782,8 +755,7 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
     Serial.println("NTP configured");
-    // First weather fetch
-    fetchOwm();
+    fetchWeather();
   }
 }
 
@@ -794,33 +766,25 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── Check time sync ──
   if (!timeReady) {
     struct tm ti;
-    if (getLocalTime(&ti, 10)) {
-      timeReady = true;
-      Serial.println("Time synced");
-    }
+    if (getLocalTime(&ti, 10)) { timeReady = true; Serial.println("Time synced"); }
   }
 
-  // ── WiFi auto-reconnect ──
   if (WiFi.status() != WL_CONNECTED) {
     static unsigned long lastRecon = 0;
-    if (now - lastRecon > 30000) {
-      lastRecon = now;
-      WiFi.reconnect();
+    if (now - lastRecon > 30000) { lastRecon = now; WiFi.reconnect(); }
+  }
+
+  if (WiFi.status() == WL_CONNECTED && !wxFetching) {
+    if (now - lastWxMs >= WX_UPDATE_MS || (lastWxMs == 0 && !wx.valid)) {
+      lastWxMs = now;
+      wxFetching = true;
+      fetchWeather();
+      wxFetching = false;
     }
   }
 
-  // ── Fetch OWM weather data ──
-  if (WiFi.status() == WL_CONNECTED && !owmFetching) {
-    if (now - lastOwm >= OWM_UPDATE_MS || (lastOwm == 0 && !owmNow.valid)) {
-      lastOwm = now;
-      fetchOwm();
-    }
-  }
-
-  // ── Read sensors ──
   if (now - lastRead >= READ_MS) {
     lastRead = now;
     float t = dht.readTemperature();
@@ -839,23 +803,19 @@ void loop() {
                   now / 1000, temp, hum, pressure, heatIdx, dewPt, alt);
   }
 
-  // ── Sparkline sampling ──
   if (now - lastSpark >= SPARK_MS) {
     lastSpark = now;
     if (!isnan(temp)) sparkPush(temp);
   }
 
-  // ── Screen rotation ──
   if (!sliding && now - lastSwitch >= SCREEN_MS) {
     lastSwitch = now;
     prevScr = curScr;
     curScr  = (curScr + 1) % NUM_SCREENS;
-    sliding = true;
+    sliding  = true;
     slideOff = 0;
   }
 
-  // ── Render ──
   renderFrame();
-
   delay(sliding ? 25 : 80);
 }
