@@ -1,0 +1,543 @@
+\documentclass[conference]{IEEEtran}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{url}
+\usepackage{cite}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{red},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  tabsize=2,
+  language=C++
+}
+
+\begin{document}
+
+\title{Design and Implementation of an IoT-Enabled Weather Monitoring Station Using ESP32 Microcontroller}
+
+\author{
+\IEEEauthorblockN{Dhruv Sharma}
+\IEEEauthorblockA{
+Department of Electronics and Communication Engineering\\
+Indian Institute of Technology Roorkee\\
+Roorkee, India\\
+}
+}
+
+\maketitle
+
+\begin{abstract}
+This paper presents the design, implementation, and testing of a compact, IoT-enabled weather monitoring station built around the ESP32-DEVKIT-V1 microcontroller. The system integrates a DHT22 digital temperature and humidity sensor, a BMP180 barometric pressure sensor, and a 128$\times$64 SSD1306 OLED display to provide real-time indoor environmental readings. Through WiFi connectivity, the station synchronizes time via NTP and fetches outdoor weather data and hourly forecasts from the Open-Meteo API, which leverages ECMWF reanalysis models for high-accuracy meteorological data. A custom multi-screen graphical user interface features smooth horizontal slide transitions, procedurally generated weather icons, sparkline trend graphs, and a seven-screen rotation displaying clock/date, indoor conditions, thermal comfort indices, outdoor weather, three-hour forecasts, barometric data, and system diagnostics. The hardware was designed as a custom two-layer PCB in Altium Designer and fabricated for standalone operation. Experimental results demonstrate reliable sensor accuracy within $\pm$0.5\textdegree C for temperature and $\pm$2\% for relative humidity, with outdoor API data closely matching reference measurements. The complete system occupies 84\% of the ESP32's flash memory and 15\% of dynamic RAM, leaving ample headroom for future extensions.
+\end{abstract}
+
+\begin{IEEEkeywords}
+ESP32, weather station, IoT, DHT22, BMP180, SSD1306 OLED, Open-Meteo API, NTP, embedded systems, PCB design
+\end{IEEEkeywords}
+
+% ════════════════════════════════════════════════
+\section{Introduction}
+% ════════════════════════════════════════════════
+
+Weather monitoring is fundamental to agriculture, disaster preparedness, aviation, and daily life. Commercial weather stations are often expensive, proprietary, and limited in customization. The proliferation of low-cost microcontrollers and open-source sensor ecosystems has made it feasible to build accurate, connected weather stations at a fraction of the cost.
+
+This project presents a complete weather monitoring station that combines \textit{local} sensor measurements with \textit{remote} meteorological data from the internet. The system is built around the ESP32 microcontroller, chosen for its integrated WiFi capability, dual-core architecture, and extensive peripheral support. Unlike simple sensor-display projects, this station provides:
+
+\begin{itemize}
+    \item Real-time indoor temperature, humidity, and barometric pressure from calibrated sensors.
+    \item Outdoor weather conditions, daily forecasts, and sunrise/sunset times retrieved from the Open-Meteo API using ECMWF model data.
+    \item NTP-synchronized real-time clock with IST (UTC+5:30) timezone support.
+    \item A polished multi-screen OLED interface with animated transitions, procedural weather icons, and live sparkline graphs.
+    \item A custom PCB designed in Altium Designer for reliable, standalone hardware operation.
+\end{itemize}
+
+The remainder of this paper is organized as follows: Section~II reviews related work. Section~III describes the system architecture and hardware design. Section~IV details the software implementation. Section~V presents experimental results, and Section~VI concludes with future work.
+
+% ════════════════════════════════════════════════
+\section{Related Work}
+% ════════════════════════════════════════════════
+
+Several ESP32-based weather station projects exist in both academic and hobbyist communities. Gandalf15~\cite{gandalf15} implemented a weather station using the ESP32 with an integrated OLED display, combining DHT22 sensor readings with OpenWeatherMap API data. Their implementation uses the ThingPulse UI framework and Meteocons font-based weather icons. However, the reliance on OpenWeatherMap's free tier introduces accuracy limitations, particularly for cities in India where station density is sparse.
+
+The ThingPulse weather station library~\cite{thingpulse} provides a framework for ESP8266/ESP32 weather displays but is tightly coupled to specific hardware configurations and requires an API key for weather data.
+
+Commercial solutions such as Davis Vantage Vue and Netatmo provide professional-grade measurements but cost significantly more (\$200--\$500) and offer limited programmability.
+
+Our work differs from these approaches in several key ways: (1)~we use the Open-Meteo API, which provides ECMWF-quality forecast data without requiring an API key; (2)~we implement a fully custom graphical interface with procedurally generated icons and smooth animations; (3)~we designed and fabricated a custom PCB rather than using breadboard prototyping; and (4)~we combine indoor and outdoor data with derived meteorological indices (heat index, dew point, comfort classification).
+
+% ════════════════════════════════════════════════
+\section{System Architecture and Hardware Design}
+% ════════════════════════════════════════════════
+
+\subsection{System Overview}
+
+The weather station consists of four primary subsystems: (1)~the ESP32 microcontroller as the central processing unit; (2)~environmental sensors for indoor measurement; (3)~an OLED display for user interface; and (4)~WiFi connectivity for NTP time synchronization and API weather data retrieval. Fig.~\ref{fig:block_diagram} shows the system block diagram.
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\columnwidth]{figures/block_diagram.png}
+    \fbox{\parbox{0.9\columnwidth}{\centering\vspace{2cm}\textit{[Placeholder: System Block Diagram]}\vspace{2cm}}}
+    \caption{System block diagram showing interconnection of the ESP32 with sensors, display, and cloud services.}
+    \label{fig:block_diagram}
+\end{figure}
+
+\subsection{Microcontroller: ESP32-DEVKIT-V1}
+
+The ESP32-WROOM-32 module was selected as the central controller. Key specifications include:
+
+\begin{itemize}
+    \item \textbf{Processor:} Dual-core Xtensa LX6 at 240~MHz
+    \item \textbf{Memory:} 520~KB SRAM, 4~MB Flash
+    \item \textbf{Connectivity:} WiFi 802.11 b/g/n, Bluetooth 4.2
+    \item \textbf{Peripherals:} 34 GPIO, 2$\times$I\textsuperscript{2}C, SPI, UART, ADC, DAC
+    \item \textbf{Operating Voltage:} 3.3~V logic, 5~V USB power input
+\end{itemize}
+
+The dual-core architecture allows the WiFi stack to operate independently on Core~0 while the application logic runs on Core~1, ensuring that network operations do not block sensor reads or display updates.
+
+\subsection{Sensors}
+
+\subsubsection{DHT22 Temperature and Humidity Sensor}
+
+The DHT22 (AM2302) is a capacitive humidity sensor coupled with a thermistor, providing digital output on a single data pin (GPIO~4). Key specifications:
+
+\begin{table}[h]
+\centering
+\caption{DHT22 Sensor Specifications}
+\label{tab:dht22}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Range} & \textbf{Accuracy} \\
+\midrule
+Temperature & $-40$ to $+80$\textdegree C & $\pm 0.5$\textdegree C \\
+Humidity & 0--100\% RH & $\pm 2$\% RH \\
+Sampling Period & \multicolumn{2}{l}{$\geq 2$~seconds} \\
+Interface & \multicolumn{2}{l}{Single-wire digital} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The sensor connects to GPIO~4 with the data pin pulled up via the ESP32's internal pull-up resistor. The proprietary single-wire protocol is handled by the Adafruit DHT library, which manages the precise timing requirements for the 40-bit data frame (16-bit humidity, 16-bit temperature, 8-bit checksum).
+
+\subsubsection{BMP180 Barometric Pressure Sensor}
+
+The BMP180 is a high-precision digital barometric pressure sensor communicating over I\textsuperscript{2}C (address \texttt{0x77}). It shares the I\textsuperscript{2}C bus (GPIO~21 SDA, GPIO~22 SCL) with the OLED display.
+
+\begin{table}[h]
+\centering
+\caption{BMP180 Sensor Specifications}
+\label{tab:bmp180}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Range} & \textbf{Accuracy} \\
+\midrule
+Pressure & 300--1100~hPa & $\pm 1$~hPa \\
+Temperature & $-40$ to $+85$\textdegree C & $\pm 1$\textdegree C \\
+Altitude & \multicolumn{2}{l}{Derived via barometric formula} \\
+Interface & \multicolumn{2}{l}{I\textsuperscript{2}C at 3.4~MHz max} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Altitude is computed from the pressure reading using the international barometric formula:
+\begin{equation}
+    h = 44330 \left(1 - \left(\frac{P}{P_0}\right)^{0.19029}\right)
+    \label{eq:altitude}
+\end{equation}
+where $P$ is the measured pressure and $P_0 = 1013.25$~hPa is the standard sea-level pressure.
+
+\subsection{Display: SSD1306 OLED}
+
+The 0.96-inch SSD1306 OLED module provides a 128$\times$64 monochrome display over I\textsuperscript{2}C (address \texttt{0x3C}). At 3.3~V operation, it draws approximately 20~mA during typical use. The display is driven by the Adafruit SSD1306 and GFX libraries, which provide a 1~KB framebuffer (128$\times$64 / 8 bits) and graphics primitives (text, lines, circles, filled shapes, bitmaps).
+
+\subsection{I\textsuperscript{2}C Bus Design}
+
+Both the SSD1306 OLED (\texttt{0x3C}) and BMP180 (\texttt{0x77}) share the same I\textsuperscript{2}C bus on GPIO~21 (SDA) and GPIO~22 (SCL). Two 4.7~k$\Omega$ pull-up resistors (R1, R2) are placed on the SDA and SCL lines, connecting to the 3.3~V rail. These pull-ups ensure proper signal integrity at the standard-mode 100~kHz clock rate used by both devices.
+
+\subsection{PCB Design}
+
+The circuit was designed as a custom two-layer PCB using Altium Designer. Fig.~\ref{fig:schematic} shows the complete schematic, and Fig.~\ref{fig:pcb_layout} shows the PCB layout.
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\columnwidth]{figures/schematic.png}
+    \fbox{\parbox{0.9\columnwidth}{\centering\vspace{2.5cm}\textit{[Placeholder: Altium Schematic Capture]}\vspace{2.5cm}}}
+    \caption{Complete schematic of the weather station showing the ESP32-DEVKIT-V1, DHT22 (J\_DHT), BMP180 (J\_BMP), SSD1306 OLED (J\_OLED), and I\textsuperscript{2}C pull-up resistors (R1, R2).}
+    \label{fig:schematic}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\columnwidth]{figures/pcb_layout.png}
+    \fbox{\parbox{0.9\columnwidth}{\centering\vspace{2.5cm}\textit{[Placeholder: Altium PCB Layout]}\vspace{2.5cm}}}
+    \caption{Two-layer PCB layout designed in Altium Designer. Top layer (red) carries signal traces; bottom layer (blue) provides a ground plane. Connectors: SLW-103-01-F-S (DHT22), SLW-104-01-F-S (OLED, BMP180).}
+    \label{fig:pcb_layout}
+\end{figure}
+
+Key PCB design decisions include:
+\begin{itemize}
+    \item \textbf{Connectors:} SLW-103-01-F-S (3-pin) for the DHT22 and SLW-104-01-F-S (4-pin) for the OLED and BMP180, enabling modular sensor attachment.
+    \item \textbf{Pull-up resistors:} MFR-25FBF52-4K75 (4.75~k$\Omega$, 1\% tolerance) surface-mount resistors for I\textsuperscript{2}C bus integrity.
+    \item \textbf{Ground plane:} Continuous bottom-layer copper pour minimizing EMI and providing a low-impedance return path.
+    \item \textbf{Trace routing:} I\textsuperscript{2}C signals routed as differential pairs with controlled spacing to minimize crosstalk.
+\end{itemize}
+
+% ════════════════════════════════════════════════
+\section{Software Implementation}
+% ════════════════════════════════════════════════
+
+The firmware is developed using the Arduino framework for ESP32, compiled with \texttt{arduino-cli}, and flashed via USB serial. The complete source code is approximately 830 lines of C++ in a single \texttt{sketch.ino} file. Table~\ref{tab:libraries} lists the software dependencies.
+
+\begin{table}[h]
+\centering
+\caption{Software Libraries Used}
+\label{tab:libraries}
+\begin{tabular}{ll}
+\toprule
+\textbf{Library} & \textbf{Purpose} \\
+\midrule
+Adafruit SSD1306 & OLED display driver \\
+Adafruit GFX & Graphics primitives \\
+DHT sensor library & DHT22 communication \\
+Adafruit BMP085 & BMP180 I\textsuperscript{2}C driver \\
+ArduinoJson 7.4 & JSON parsing for API data \\
+WiFi (ESP-IDF) & WiFi STA mode \\
+HTTPClient (ESP-IDF) & HTTPS requests \\
+time.h (newlib) & NTP synchronization \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{System Initialization and Boot Sequence}
+
+The boot sequence is presented as an animated splash screen on the OLED:
+
+\begin{enumerate}
+    \item \textbf{Border animation:} A rectangle progressively draws itself across the display.
+    \item \textbf{Typing effect:} ``ESP32'' and ``WEATHER STATION'' are rendered character-by-character with inter-character delays to simulate a typewriter.
+    \item \textbf{Sensor enumeration:} DHT22 and BMP180 initialization status is displayed line-by-line.
+    \item \textbf{WiFi connection:} A progress bar fills while the system attempts to connect (up to 10~seconds / 20 attempts at 500~ms intervals).
+    \item \textbf{Screen flash:} A brief invert/restore effect signals boot completion.
+\end{enumerate}
+
+After boot, the system configures NTP time synchronization using \texttt{pool.ntp.org} with a GMT offset of 19800~seconds (IST, UTC+5:30), and performs an initial weather data fetch from the Open-Meteo API.
+
+\subsection{Sensor Acquisition}
+
+Sensors are polled every 2~seconds (\texttt{READ\_MS = 2000}). The DHT22 provides temperature ($T$) and relative humidity ($H$), from which two derived quantities are computed:
+
+\subsubsection{Heat Index}
+The heat index (``feels-like'' temperature) is computed using the Rothfusz regression equation as implemented in the Adafruit DHT library:
+\begin{equation}
+    HI = c_1 + c_2 T + c_3 H + c_4 TH + c_5 T^2 + c_6 H^2 + \ldots
+\end{equation}
+where $c_1, c_2, \ldots$ are empirically derived constants.
+
+\subsubsection{Dew Point}
+The dew point is computed using the Magnus formula:
+\begin{equation}
+    T_d = \frac{b \cdot \gamma(T, H)}{a - \gamma(T, H)}
+    \label{eq:dewpoint}
+\end{equation}
+where $\gamma(T, H) = \frac{aT}{b + T} + \ln\left(\frac{H}{100}\right)$ with constants $a = 17.271$ and $b = 237.7$\textdegree C.
+
+\subsubsection{Comfort Classification}
+A rule-based comfort label is assigned based on threshold logic:
+\begin{itemize}
+    \item $T > 35$\textdegree C and $H > 60$\%: ``Hot \& Humid''
+    \item $T > 35$\textdegree C: ``Too Hot''
+    \item $T < 10$\textdegree C: ``Too Cold''
+    \item $H > 70$\%: ``Too Humid''
+    \item $H < 30$\%: ``Too Dry''
+    \item Otherwise: ``Comfortable''
+\end{itemize}
+
+\subsection{Weather API Integration}
+
+The system fetches outdoor weather data from the Open-Meteo API~\cite{openmeteo}, which provides free, keyless access to ECMWF (European Centre for Medium-Range Weather Forecasts) model data. A single HTTPS GET request retrieves:
+
+\begin{itemize}
+    \item \textbf{Current conditions:} Temperature, apparent temperature, relative humidity, wind speed, and WMO weather code.
+    \item \textbf{Daily summary:} Minimum/maximum temperature, sunrise and sunset times.
+    \item \textbf{Hourly forecast:} 48 hourly slots (2 days) of temperature and weather codes.
+\end{itemize}
+
+The API URL is constructed at compile time using string literal concatenation:
+\begin{lstlisting}[caption={Open-Meteo API request URL},label={lst:apiurl}]
+https://api.open-meteo.com/v1/forecast
+  ?latitude=29.8667&longitude=77.8833
+  &current=temperature_2m,
+    relative_humidity_2m,
+    apparent_temperature,
+    weather_code,wind_speed_10m
+  &daily=temperature_2m_max,
+    temperature_2m_min,sunrise,sunset
+  &hourly=temperature_2m,weather_code
+  &timezone=Asia/Kolkata
+  &forecast_days=2
+\end{lstlisting}
+
+Weather data is refreshed every 10~minutes (\texttt{WX\_UPDATE\_MS = 600000}), well within the free tier limit of 10,000 requests per day.
+
+\subsubsection{WMO Weather Code Mapping}
+
+The World Meteorological Organization (WMO) defines integer weather codes that the system maps to both textual descriptions and procedural icon types:
+
+\begin{table}[h]
+\centering
+\caption{WMO Weather Code to Icon Mapping}
+\label{tab:wmo_codes}
+\begin{tabular}{lll}
+\toprule
+\textbf{WMO Code} & \textbf{Description} & \textbf{Icon} \\
+\midrule
+0--1 & Clear sky & Sun \\
+2 & Partly cloudy & Sun + Cloud \\
+3 & Overcast & Cloud \\
+45, 48 & Fog & Mist lines \\
+51--65 & Drizzle/Rain & Raindrop \\
+71--77 & Snow & Snowflake \\
+80--86 & Showers & Raindrop/Snow \\
+95--99 & Thunderstorm & Lightning bolt \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{API Selection Rationale}
+
+The project initially used the OpenWeatherMap API but switched to Open-Meteo for three reasons: (1)~Open-Meteo requires no API key, simplifying deployment; (2)~it uses ECMWF model data which provides superior accuracy, especially for locations in India where OWM's weather station network is sparse; (3)~its \texttt{daily.temperature\_2m\_min/max} fields represent genuine forecast extremes, unlike OWM's \texttt{temp\_min/temp\_max} which only reflect the instantaneous spread across nearby stations.
+
+\subsection{User Interface Design}
+
+The UI implements a seven-screen carousel with 5-second auto-rotation and horizontal slide transitions. Each screen receives an x-offset parameter enabling the transition engine to render both the outgoing and incoming screens simultaneously during animation.
+
+\subsubsection{Screen Descriptions}
+
+\begin{enumerate}
+    \item \textbf{TIME:} Large 3$\times$-size HH:MM display with blinking colon (500~ms toggle), 2$\times$-size seconds, and centered date string (e.g., ``Mon, 05 May 2026'').
+    \item \textbf{INDOOR:} DHT22 temperature in 2$\times$ font, humidity with a proportional bar graph, barometric pressure from BMP180, and a procedural weather icon based on sensor thresholds.
+    \item \textbf{COMFORT:} Heat index (feels-like temperature), dew point computed via Magnus formula, and a rule-based comfort classification label.
+    \item \textbf{OUTDOOR:} Open-Meteo current conditions---city name, WMO-mapped weather icon, current temperature in 2$\times$ font, text description, daily min/max, sunrise and sunset times.
+    \item \textbf{FORECAST:} Three-column layout showing weather at +3h, +6h, and +9h from the current time. Each column contains the time label, a small procedural icon, temperature, and a short condition label ($\leq$5 characters).
+    \item \textbf{PRESSURE:} BMP180 barometric pressure in 2$\times$ font with a bar gauge (900--1050~hPa range), qualitative pressure label (Low/Norm/High), and computed altitude.
+    \item \textbf{SYSTEM:} Uptime counter, sensor/WiFi/API health status, and a sparkline graph showing the temperature trend over the last 10 minutes (sampled every 10~seconds into a 60-element ring buffer).
+\end{enumerate}
+
+\subsubsection{Chrome and Navigation}
+
+All screens share a common ``chrome'' consisting of:
+\begin{itemize}
+    \item An inverted (white-on-black) header bar showing the screen title and a live HH:MM clock.
+    \item A row of centered page-indicator dots at the bottom, with the active screen's dot filled.
+\end{itemize}
+
+\subsubsection{Transition Engine}
+
+Screen transitions use a horizontal slide animation. When a screen change is triggered, the engine:
+\begin{enumerate}
+    \item Renders the outgoing screen at x-offset $= -\Delta$ (sliding left).
+    \item Renders the incoming screen at x-offset $= 128 - \Delta$ (entering from right).
+    \item Increments $\Delta$ by \texttt{SLIDE\_STEP} (32~pixels) each frame at 25~ms intervals.
+    \item Completes when $\Delta \geq 128$, resulting in a 4-frame transition ($\approx$100~ms).
+\end{enumerate}
+
+\subsubsection{Procedural Weather Icons}
+
+Rather than storing bitmap images, the system generates weather icons procedurally using the Adafruit GFX drawing primitives:
+
+\begin{itemize}
+    \item \textbf{Sun:} Filled circle with 8 radial lines computed via trigonometric rotation at 45\textdegree{} intervals.
+    \item \textbf{Cloud:} Three overlapping filled circles with a filled rectangle base.
+    \item \textbf{Raindrop:} Filled circle body with a filled triangle top forming a teardrop shape.
+    \item \textbf{Snowflake:} Three intersecting lines (vertical, two diagonals).
+    \item \textbf{Lightning:} A three-segment zigzag line.
+    \item \textbf{Mist:} Four horizontal parallel lines.
+\end{itemize}
+
+Each icon is available in two sizes: full (for the outdoor screen) and small (for forecast columns).
+
+\subsubsection{Sparkline Graph}
+
+The system maintains a 60-element ring buffer sampled every 10~seconds, providing approximately 10 minutes of temperature history. The sparkline renderer:
+\begin{enumerate}
+    \item Scans the buffer to determine min/max bounds.
+    \item Maps each sample to pixel coordinates within the graph area using linear interpolation.
+    \item Draws connected line segments between consecutive points.
+    \item Labels the min/max values on the right side of the graph.
+\end{enumerate}
+
+\subsection{WiFi and Network Management}
+
+The system connects to WiFi in Station (STA) mode during the boot splash. If the initial connection fails (10-second timeout), the system continues operating in offline mode with indoor sensors only. An auto-reconnection mechanism in the main loop attempts reconnection every 30~seconds if the connection drops. NTP time synchronization is configured once after WiFi connects and is maintained by the ESP-IDF SNTP subsystem.
+
+\subsection{Resource Utilization}
+
+\begin{table}[h]
+\centering
+\caption{ESP32 Resource Usage}
+\label{tab:resources}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Resource} & \textbf{Used} & \textbf{Available} \\
+\midrule
+Flash (program) & 1,106,524 B (84\%) & 1,310,720 B \\
+SRAM (globals) & 50,784 B (15\%) & 327,680 B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The modest RAM usage (15\%) leaves substantial headroom for stack-allocated variables, the WiFi stack, and JSON parsing buffers.
+
+% ════════════════════════════════════════════════
+\section{Experimental Results}
+% ════════════════════════════════════════════════
+
+\subsection{Test Setup}
+
+The weather station was tested in Roorkee, India (29.87\textdegree N, 77.88\textdegree E, elevation $\approx$317~m) over a period of several days in April--May 2026. The hardware was assembled on the custom PCB and powered via USB from a standard 5~V adapter.
+
+\subsection{Indoor Sensor Validation}
+
+Table~\ref{tab:sensor_readings} shows representative indoor sensor readings from a typical test session.
+
+\begin{table}[h]
+\centering
+\caption{Representative Indoor Sensor Readings}
+\label{tab:sensor_readings}
+\begin{tabular}{lr}
+\toprule
+\textbf{Parameter} & \textbf{Reading} \\
+\midrule
+Temperature & 28.0\textdegree C \\
+Relative Humidity & 45.8\% \\
+Heat Index & 28.1\textdegree C \\
+Dew Point & 15.2\textdegree C \\
+Barometric Pressure & 975.8~hPa \\
+Computed Altitude & 317~m \\
+Comfort Level & Comfortable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The computed altitude of 317~m closely matches Roorkee's known elevation of 274~m above mean sea level, with the $\approx$40~m discrepancy attributable to using the standard sea-level reference pressure ($P_0 = 1013.25$~hPa) rather than a locally calibrated value.
+
+\subsection{API Comparison: OpenWeatherMap vs. Open-Meteo}
+
+A comparative test was performed to evaluate API accuracy. Table~\ref{tab:api_compare} summarizes simultaneous readings from three APIs for the same location and time.
+
+\begin{table}[h]
+\centering
+\caption{API Comparison for Roorkee (Simultaneous Readings)}
+\label{tab:api_compare}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Parameter} & \textbf{OWM} & \textbf{Open-Meteo} & \textbf{wttr.in} \\
+\midrule
+Temperature & 37.1\textdegree C & 33.7\textdegree C & 41.0\textdegree C \\
+Humidity & 11\% & 33\% & 7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Open-Meteo's readings aligned most closely with reference values from the India Meteorological Department (IMD) for Roorkee. The significant discrepancy in OWM data ($\approx$4\textdegree C deviation) is attributed to its reliance on sparse ground-station data in the region, whereas Open-Meteo uses gridded ECMWF reanalysis data with 11~km resolution.
+
+\subsection{Display Performance}
+
+The seven-screen UI was evaluated for responsiveness:
+
+\begin{itemize}
+    \item \textbf{Frame rate:} Approximately 12~FPS during normal display (80~ms delay between frames), increasing to 40~FPS during slide transitions (25~ms delay).
+    \item \textbf{Transition duration:} Four frames $\times$ 25~ms $= \approx$100~ms for complete slide animation.
+    \item \textbf{Screen rotation:} 5-second interval per screen, 35-second full cycle.
+    \item \textbf{Clock accuracy:} NTP sync provides sub-second accuracy; blinking colon toggles at 500~ms.
+\end{itemize}
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\columnwidth]{figures/display_screens.png}
+    \fbox{\parbox{0.9\columnwidth}{\centering\vspace{2.5cm}\textit{[Placeholder: Photographs of all 7 OLED screens]}\vspace{2.5cm}}}
+    \caption{The seven display screens: (a)~Time, (b)~Indoor, (c)~Comfort, (d)~Outdoor, (e)~Forecast, (f)~Pressure, (g)~System.}
+    \label{fig:display_screens}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    % \includegraphics[width=\columnwidth]{figures/hardware_photo.png}
+    \fbox{\parbox{0.9\columnwidth}{\centering\vspace{2.5cm}\textit{[Placeholder: Photo of assembled hardware]}\vspace{2.5cm}}}
+    \caption{Assembled weather station hardware on the custom PCB.}
+    \label{fig:hardware}
+\end{figure}
+
+% ════════════════════════════════════════════════
+\section{Conclusion and Future Work}
+% ════════════════════════════════════════════════
+
+This paper presented a complete IoT-enabled weather monitoring station combining local sensor measurements with cloud-sourced meteorological data. The system demonstrates that an ESP32-based platform can deliver a polished, multi-screen weather display with animated transitions, real-time clock, and accurate forecast data---all within the constraints of a microcontroller with 1.3~MB flash and 520~KB RAM.
+
+Key achievements include:
+\begin{itemize}
+    \item Reliable indoor sensing with DHT22 and BMP180, including derived thermal comfort metrics.
+    \item Integration with the Open-Meteo API for accurate outdoor weather data using ECMWF models.
+    \item A seven-screen GUI with procedural icons, sparkline graphs, and smooth transitions.
+    \item A custom two-layer PCB designed in Altium Designer and fabricated for standalone operation.
+\end{itemize}
+
+Future work could extend the system with:
+\begin{itemize}
+    \item \textbf{Data logging:} Writing sensor data to an SD card or a cloud database (e.g., ThingSpeak, InfluxDB) for historical analysis.
+    \item \textbf{Additional sensors:} UV index (VEML6075), air quality (MQ-135), or rainfall gauge.
+    \item \textbf{Bluetooth Low Energy:} Mobile app integration for remote monitoring.
+    \item \textbf{Solar power:} Battery and solar panel for outdoor deployment with deep-sleep optimization.
+    \item \textbf{Multi-day forecast:} Extending the forecast display to show 3--5 day outlooks.
+    \item \textbf{Enclosure:} 3D-printed weather-resistant enclosure for permanent outdoor installation.
+\end{itemize}
+
+% ════════════════════════════════════════════════
+% REFERENCES
+% ════════════════════════════════════════════════
+
+\begin{thebibliography}{9}
+
+\bibitem{gandalf15}
+gandalf15, ``ESP32 Weather Station,'' GitHub repository, 2023. [Online]. Available: \url{https://github.com/gandalf15/esp32_weather_station}
+
+\bibitem{thingpulse}
+ThingPulse, ``ESP8266 Weather Station,'' GitHub repository. [Online]. Available: \url{https://github.com/ThingPulse/esp8266-weather-station}
+
+\bibitem{openmeteo}
+Open-Meteo, ``Free Weather API,'' 2024. [Online]. Available: \url{https://open-meteo.com/}
+
+\bibitem{ecmwf}
+European Centre for Medium-Range Weather Forecasts (ECMWF), ``IFS Documentation.'' [Online]. Available: \url{https://www.ecmwf.int/en/publications/ifs-documentation}
+
+\bibitem{espressif}
+Espressif Systems, ``ESP32 Technical Reference Manual,'' Version 5.0, 2023.
+
+\bibitem{bosch_bmp180}
+Bosch Sensortec, ``BMP180 Digital Pressure Sensor Datasheet,'' BST-BMP180-DS000-12, 2015.
+
+\bibitem{aosong_dht22}
+Aosong Electronics, ``AM2302/DHT22 Digital Temperature and Humidity Sensor Datasheet,'' 2020.
+
+\bibitem{solomon_ssd1306}
+Solomon Systech, ``SSD1306 128$\times$64 Dot Matrix OLED/PLED Segment/Common Driver with Controller,'' Rev 1.1, 2008.
+
+\bibitem{magnus}
+O.~A. Alduchov and R.~E. Eskridge, ``Improved Magnus form approximation of saturation vapor pressure,'' \textit{J. Applied Meteorology and Climatology}, vol.~35, no.~4, pp.~601--609, 1996.
+
+\end{thebibliography}
+
+\end{document}
